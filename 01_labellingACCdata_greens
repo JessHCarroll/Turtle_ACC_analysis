@@ -1,0 +1,382 @@
+
+rm(list=ls())
+library(dplyr)
+library(lubridate)
+library(zoo)
+library(tidyr)
+library(tidyverse)
+
+#id<-"T1"
+dattime<-"14/11/2023"
+dt<-gsub('/', '', dattime)
+
+#day<-"D1"
+#position<-"P1"
+path<-"C:/Users/xcarrj/Desktop/turtleacc_analysis/greens/1411/"
+
+setwd(paste0(path))
+
+#this section sorts any time offsets between BORIS, Gopro and recording. 
+#Returns a DF with correct time for behaviours to then label the accelerometer data
+
+for (i in 1:length(list.files(pattern = "batch", ignore.case = TRUE))){
+  
+  #import behaviour labesl for each batch
+  files<-list.files(paste0(path,"batch",i,"/" ))
+  files<-paste0(path,"batch",i,"/", files)
+  print(paste("Processing batch", i))
+  
+  tables <- lapply(files, read.csv, header = TRUE)
+  labs <- do.call(rbind , tables)
+  labs<-labs[order(as.POSIXct(labs$Time, origin="1970-01-01")), ] 
+  #format time
+  labs$timeformat<-as.POSIXct(labs$Time, origin="1970-01-01")
+  #check MS time
+  labs$timeformat<-format(labs$timeformat,"%Y-%d-%m %H:%M:%OS2")
+ 
+    #subset data for master time synch DF and vidoe batches
+   labs<-labs %>%
+     mutate(input = cumsum(Source != lag(Source) | row_number() == 1)) 
+  
+  UTClab<-labs %>% filter(Behavior== "UTC time",  )
+  
+   GPtime1<-labs %>% 
+    filter(Behavior == "gopro_time") %>%
+     arrange(Time) %>%
+    slice(1) %>% # takes the first occurrence if there is a tie
+    ungroup()
+  
+   timeOffsetDF<- rbind(UTClab, GPtime1)
+  
+   timeOffsetDF<-timeOffsetDF[order(as.POSIXct(timeOffsetDF$Time, origin="1970-01-01")), ] 
+  
+   #if behaviours in master timesynch file 
+   
+   
+  if (nrow(labs %>% 
+           filter(Behavior == "gopro_time"))==1 | nrow(labs %>% 
+                                                       filter(input == "1"))>2){
+    labs<-labs %>% 
+      filter(!Behavior == "UTC time")
+}else{
+  
+   labs<-labs %>% 
+     filter(!Behavior == "UTC time")
+   
+   labs<-labs %>% 
+     filter(!(Behavior == "gopro_time" & input==1))
+  }
+   
+   
+  
+  
+  #using multiple video files results in slight time offset between logged behaviour and gopro time. fix this first.
+  
+  #group each new video
+  labs<-labs %>%
+    mutate(group = cumsum(Behavior=="gopro_time" | row_number() == 1))
+  
+  
+  
+  # labs<-labs %>%
+  #   mutate(group = cumsum(Source != lag(Source) | row_number() == 1))
+  
+  #find time difference
+
+  #calculate offset within video
+  offset_fun<-function(dataframe){
+    dataframe$Time<-as.POSIXct(dataframe$Time, origin="1970-01-01")
+    dataframe$Time2<-format(dataframe$Time,"%Y-%m-%d %H:%M:%OS4")  
+    if (nrow(dataframe[dataframe$Behavior=="gopro_time",]) >1){
+      vidtime<-head(dataframe[dataframe$Behavior=="gopro_time",],1)
+    }else {
+      vidtime<-dataframe[dataframe$Behavior=="gopro_time",] 
+    }
+    vidtime_extract<-paste(dattime,vidtime$Comment)
+    vidtime_extractFor<-as.POSIXct(vidtime_extract, "%d/%m/%Y %H:%M:%OS",tz = "UTC")
+    timeoffset<-round(difftime(vidtime_extractFor, force_tz(vidtime$Time, "UTC"), units="secs"),2) #2 for precision but 1 sec because only rounding to sec.
+    
+    dataframe$timecorr<- dataframe$Time+ timeoffset
+    
+    dataframe$timecorr<-as.POSIXct(dataframe$timecorr, origin="1970-01-01")
+    #format form CET to UTC
+    dataframe$timecorr<-force_tz(dataframe$timecorr, "UTC")
+    
+    dataframe$timecorr_ms<-format(dataframe$timecorr,"%Y-%m-%d %H:%M:%OS4") 
+    
+    return(dataframe)
+    
+  }
+  
+  labsCorr<-as.data.frame(labs %>%
+                            group_by(group) %>%
+                            do(data.frame(offset_fun(.)))%>%
+                            ungroup())
+  
+  labsCorr<-labsCorr[-grep("gopro_time", labsCorr$Behavior), ]
+  
+  
+  #now each video is corrected, correct master time
+  
+  ##synchronise times on label import
+  vidtime<-timeOffsetDF
+  
+  #correct for gopro offset
+ #vidtimeGP<-offset_fun(vidtime)
+  
+  vidtimeUTC<-vidtime[vidtime$Behavior == 'UTC time',]
+  vidtime_extractUTC<-as.character(gsub("UTC", "", vidtimeUTC$Comment))
+  vidtime_extractUTC<-paste(dattime,vidtime_extractUTC)
+  vidtime_extractForUTC<-as.POSIXct(vidtime_extractUTC, "%d/%m/%Y %H:%M:%OS",tz = "UTC")
+  
+  vidtime$Time<-as.POSIXct(vidtime$Time, origin="1970-01-01")
+  vidtime$Time2<-format(vidtime$Time,"%Y-%m-%d %H:%M:%OS4") 
+  
+  #was vidtime_extractForUTC
+  timeoffsetUTC<-abs(as.numeric(difftime(force_tz(vidtime$Time[which(vidtime$Behavior=="UTC time")],tz = "UTC"),force_tz(vidtime$Time[which(vidtime$Behavior=="gopro_time")],tz = "UTC"), units="secs")))
+  
+  # vidtime_UTCTIME<-as.POSIXct(vidtimeUTC$Time, origin="1970-01-01")
+  # vidtime_UTCTIME<- force_tz(vidtime_UTCTIME, tz="UTC")
+  # timeoffsetUTC<-as.numeric(difftime(vidtime_extractForUTC,vidtime_UTCTIME, units="secs"))
+  
+  
+  GPorder<-which(vidtime$Behavior=="gopro_time")
+  UTCorder<-which(vidtime$Behavior=="UTC time")
+  
+  
+  #correct for UTC offset
+  if(GPorder<UTCorder){ #if gp time is ahead of UTC time then - seconds
+    #vidtime_UTCTIME<-vidtime_UTCTIME-timeoffsetUTC
+    
+    labsCorr$timecorrUTC<- labsCorr$timecorr- timeoffsetUTC
+    
+    labsCorr$timecorrUTC<-as.POSIXct(labsCorr$timecorrUTC, origin="1970-01-01")
+    #format form CET to UTC
+    labsCorr$timecorrUTC<-force_tz(labsCorr$timecorrUTC, "UTC")
+    
+    labsCorr$timecorr_msUTC<-format(labsCorr$timecorrUTC,"%Y-%m-%d %H:%M:%OS2")
+    
+    
+  }else if (GPorder>UTCorder){ #if gp time is behind UTC then + seconds
+   # vidtime_UTCTIME<-vidtime_UTCTIME-timeoffsetUTC
+    labsCorr$timecorrUTC<- labsCorr$timecorr+ timeoffsetUTC
+    
+    labsCorr$timecorrUTC<-as.POSIXct(labsCorr$timecorrUTC, origin="1970-01-01")
+    #format form CET to UTC
+    labsCorr$timecorrUTC<-force_tz(labsCorr$timecorrUTC, "UTC")
+    
+    labsCorr$timecorr_msUTC<-format(labsCorr$timecorrUTC,"%Y-%m-%d %H:%M:%OS2")
+  } else{
+    
+    labsCorr$timecorrUTC<-force_tz(labsCorr$timecorr, "UTC")
+    
+    labsCorr$timecorr_msUTC<-format(labsCorr$timecorr,"%Y-%m-%d %H:%M:%OS2")
+    
+  }
+  
+  #now format for intervals
+  #long to wide and format
+  data_wide <- spread(labsCorr, Behavior.type, timecorrUTC)
+ # data_wide
+  
+  data_wide$START<-na.locf(data_wide$START,na.rm = FALSE)
+  
+  data_wide<-data_wide %>% drop_na(STOP)
+  
+  #final dataframe for time interval labs
+  labs_finalFormat<-data_wide %>% select('Behavior','START', 'STOP', 'Subject')
+  
+  #remove milisecond error in label recordings
+  #round start up to next second
+  labs_finalFormat$START_ms<-format(labs_finalFormat$START,"%Y-%m-%d %H:%M:%OS2")
+  labs_finalFormat$START_round <- ceiling_date(labs_finalFormat$START, unit = "1 second")
+  
+  #round stop down to previous second
+  labs_finalFormat$STOP_ms<-format(labs_finalFormat$STOP,"%Y-%m-%d %H:%M:%OS2")
+  labs_finalFormat$STOP_round <- floor_date(labs_finalFormat$STOP, unit = "1 second")
+  
+  labs_finalCLean<- labs_finalFormat[,c(1,4,6,8)]
+  
+  labs_finalCLean$START_round<-format(labs_finalCLean$START_round, "%Y-%m-%d %H:%M:%OS2")
+  labs_finalCLean$STOP_round<-format(labs_finalCLean$STOP_round, "%Y-%m-%d %H:%M:%OS2")
+  
+  
+  #df2 should be accelerometer data
+  #df1 should be intervals
+  labs_finalCLean <- labs_finalCLean %>% 
+    rename("START"="START_round" ,
+           "STOP" = "STOP_round")
+  
+  #remove any observations less than 2 seconds (otherwise nothing left after trimming)
+  #find time diff in seconds
+  labs_finalCLean$interval<-as.numeric(difftime(labs_finalCLean$STOP, labs_finalCLean$START))
+  #remove labels less than 2 seconds
+  labs_finalCLean2 <-labs_finalCLean[labs_finalCLean$interval > 2, ] 
+  
+  #cut ends of period. add 1 sec to start, remove 1 sec from end to account for time synch errors
+  labs_finalCLean2$START<-as.POSIXct(labs_finalCLean2$START, "%Y-%m-%d %H:%M:%OS",tz = "UTC")
+  labs_finalCLean2$START_buf<-labs_finalCLean2$START + 1
+  labs_finalCLean2$STOP<-as.POSIXct(labs_finalCLean2$STOP, "%Y-%m-%d %H:%M:%OS",tz = "UTC")
+  labs_finalCLean2$STOP_buf<-labs_finalCLean2$STOP - 1
+  
+  ##clean dataframe
+  labs_finalCLean3<- labs_finalCLean2[,c(1,2,6,7)]
+  
+  labs_finalCLean3 <- labs_finalCLean3 %>% 
+    rename("START"="START_buf" ,
+           "STOP" = "STOP_buf")
+  
+  write.csv(labs_finalCLean3, paste0(path,"time_corrected/", "correctTimeLabs_batch", i, "_",dt, ".csv"))
+  
+}
+
+
+#now label to acc data
+
+
+
+
+files<-list.files(paste0(path,"time_corrected/" ))
+files<-paste0(path,"time_corrected/", files)
+tables <- lapply(files, read.csv, header = TRUE)
+labs <- do.call(rbind , tables)
+
+
+
+for (i in 1:length(unique(labs$Subject))){
+  print(paste("Processing", unique(labs$Subject)[i]))  
+turtlelabs<- labs%>% filter(labs$Subject==unique(labs$Subject)[i])
+turtlelabs$START<- as.POSIXct(turtlelabs$START, "%Y-%m-%d %H:%M:%OS",tz = "UTC")
+turtlelabs$STOP<- as.POSIXct(turtlelabs$STOP, "%Y-%m-%d %H:%M:%OS",tz = "UTC")
+
+#####read position 1 data
+acc_dataP1<-read.csv(paste0(path, "acc_data/", unique(labs$Subject)[i], "/pos_1/acc_data.csv"),sep = "", header = T)
+
+acc_dataP1$x <- paste(acc_dataP1$Date,acc_dataP1$Time)
+
+acc_dataP1$time <- as.POSIXct(acc_dataP1$x, "%d/%m/%Y %H:%M:%OS",tz = "UTC")
+
+
+#now trim acc to start of observations to reduce processing time
+#fromat for trimming
+
+#now label accelerometer data!! first for P1
+df1<-turtlelabs
+
+df2<-acc_dataP1
+
+df1 <- as_tibble(df1) |> 
+  mutate(across(c(START, STOP), ymd_hms))
+
+df2 <- as_tibble(df2) |> 
+  mutate(x = dmy_hms(x))
+
+newdf<-df2 |> 
+  left_join(df1, join_by(between(x, START, STOP))) 
+#|> 
+# select(x, time, Behavior)
+
+#cleanup output
+newdf<-as.data.frame(newdf)
+
+newdf$time_form <- as.POSIXct(newdf$time, "%Y-%m-%d %H:%M:%OS",tz = "UTC")
+
+#options(max.print=500)
+
+colnames(newdf)
+
+newdf_short<-newdf[,c(4,5,6,8,17,18,19,20,22,23,26)]
+
+newdf_short<-newdf_short %>% drop_na(Behavior)
+
+newdf_short$time<-format(newdf_short$time, "%Y-%m-%d %H:%M:%OS2")
+
+acc_file <- paste0("C:/Users/xcarrj/Desktop/turtleacc_analysis/greens/lab_accdata/pos_1/", unique(labs$Subject)[i],"_",dt, ".csv")
+write.csv(newdf_short, acc_file)
+
+
+# library(plotly)
+# 
+# plot_ly(x = newdf_short$time_form, 
+#         y = newdf_short$X, 
+#         mode = 'scatter', 
+#         color = as.factor(newdf_short$Behavior))%>%
+#   layout(title = 'X position 1')
+
+# 
+# plot_ly(x = newdf_short$time_form, 
+#         y = newdf_short$Y, 
+#         mode = 'scatter', 
+#         color = as.factor(newdf_short$Behavior))
+# 
+# 
+# plot_ly(x = newdf_short$time_form, 
+#         y = newdf_short$Z, 
+#         mode = 'scatter', 
+#         color = as.factor(newdf_short$Behavior))
+
+#now label accelerometer data!! now P2
+
+#####read position 2 data
+acc_dataP2<-read.csv(paste0(path, "acc_data/", unique(labs$Subject)[i], "/pos_2/acc_data.csv"),sep = "", header = T)
+
+acc_dataP2$x <- paste(acc_dataP2$Date,acc_dataP2$Time)
+
+acc_dataP2$time <- as.POSIXct(acc_dataP2$x, "%d/%m/%Y %H:%M:%OS",tz = "UTC")
+
+#label data
+df1.2<-turtlelabs
+
+df2.2<-acc_dataP2
+
+df1.2 <- as_tibble(df1.2) |> 
+  mutate(across(c(START, STOP), ymd_hms))
+
+df2.2 <- as_tibble(df2.2) |> 
+  mutate(x = dmy_hms(x))
+
+newdfP2<-df2.2 |> 
+  left_join(df1.2, join_by(between(x, START, STOP))) 
+#|> 
+# select(x, time, Behavior)
+
+#cleanup output
+newdfP2<-as.data.frame(newdfP2)
+
+newdfP2$time_form <- as.POSIXct(newdfP2$time, "%Y-%m-%d %H:%M:%OS",tz = "UTC")
+
+#options(max.print=500)
+
+newdf_shortP2<-newdfP2[,c(4,5,6,8,17,18,19,20,22,23,26)]
+
+newdf_shortP2<-newdf_shortP2 %>% drop_na(Behavior)
+
+head(newdf_shortP2)
+tail(newdf_shortP2)
+
+newdf_shortP2$time<-format(newdf_shortP2$time, "%Y-%m-%d %H:%M:%OS2")
+
+acc_file2 <- paste0("C:/Users/xcarrj/Desktop/turtleacc_analysis/greens/lab_accdata/pos_2/", unique(labs$Subject)[i], "_",dt,".csv")
+write.csv(newdf_shortP2, acc_file2)
+
+
+
+# plot_ly(x = newdf_shortP2$time_form, 
+#         y = newdf_shortP2$X, 
+#         mode = 'scatter', 
+#         color = as.factor(newdf_shortP2$Behavior))%>%
+#   layout(title = 'X position 2')
+
+# 
+# plot_ly(x = newdf_shortP2$time_form, 
+#         y = newdf_shortP2$Y, 
+#         mode = 'scatter', 
+#         color = as.factor(newdf_shortP2$Behavior))
+# 
+# 
+# plot_ly(x = newdf_shortP2$time_form, 
+#         y = newdf_shortP2$Z, 
+#         mode = 'scatter', 
+#         color = as.factor(newdf_shortP2$Behavior))
+  
+}

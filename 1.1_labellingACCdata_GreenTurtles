@@ -6,12 +6,10 @@ library(zoo)
 library(tidyr)
 library(tidyverse)
 
-#id<-"T1"
+#change dattime to that of the deployment
 dattime<-"14/11/2023"
 dt<-gsub('/', '', dattime)
 
-#day<-"D1"
-#position<-"P1"
 path<-"C:/Users/xcarrj/Desktop/turtleacc_analysis/greens/1411/"
 
 setwd(paste0(path))

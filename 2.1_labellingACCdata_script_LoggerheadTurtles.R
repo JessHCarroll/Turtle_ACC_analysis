@@ -7,6 +7,7 @@ library(zoo)
 library(tidyr)
 library(tidyverse)
 
+#Change variables as appropriate.
 id<-"T7"
 dattime<-"11/03/2023"
 day<-"D2"
